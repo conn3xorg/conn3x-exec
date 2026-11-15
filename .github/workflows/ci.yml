@@ -22,8 +22,9 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go vet ./...
-      - run: test -z "$(gofmt -l .)"
-        shell: bash
+      # Windows checks out with CRLF, which gofmt reads as unformatted.
+      - if: runner.os == 'Linux'
+        run: test -z "$(gofmt -l .)"
       # shortcut: TestRealConn3x skips here (no conn3x binary); add a released
       # conn3x to this job once one carries the conn3x step object.
       - run: go test -race ./...
