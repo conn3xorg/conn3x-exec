@@ -26,6 +26,24 @@ func TestMain(m *testing.M) {
 		fmt.Println(`{"@level":"info","@message":"Conn3x v0.21.0","conn3x":"0.21.0","tofu":"1.13.9","type":"version","ui":"1.2"}`)
 		fmt.Println(strings.Join(os.Args[1:], " "))
 		fmt.Println(applyLine)
+	case "into":
+		// Writes the stream to -json-into a line at a time, with a pause, as
+		// a real apply would, and prints human output on stdout.
+		path := strings.TrimPrefix(os.Args[2], "-json-into=")
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			os.Exit(3)
+		}
+		fmt.Println("Apply complete!")
+		fmt.Fprintln(f, `{"type":"apply_start"}`)
+		time.Sleep(300 * time.Millisecond)
+		fmt.Fprintln(f, applyLine)
+		if os.Getenv("CONN3X_FAKE_WAIT") != "" {
+			ch := make(chan os.Signal, 1)
+			signal.Notify(ch, os.Interrupt)
+			<-ch
+			os.Exit(1)
+		}
 	case "fail":
 		fmt.Println(`{"@level":"error","@message":"Error: no host","diagnostic":{"severity":"error","summary":"no host","detail":""},"type":"diagnostic"}`)
 		os.Exit(2)
@@ -97,6 +115,39 @@ func TestRunFnError(t *testing.T) {
 	err := fake(t, "wait").Run(context.Background(), func(Event) error { return stop }, "apply")
 	if !errors.Is(err, stop) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// RunInto follows the -json-into file while conn3x writes it, and gets
+// every line, the last one written just before it exits.
+func TestRunInto(t *testing.T) {
+	stream := t.TempDir() + "/stream.json"
+	var types []string
+	err := fake(t, "into").RunInto(context.Background(), func(ev Event) error { types = append(types, ev.Type); return nil }, stream, "apply", "-report=r.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(types) != "[apply_start apply_complete]" {
+		t.Errorf("events %v", types)
+	}
+}
+
+func TestRunIntoCancelInterrupts(t *testing.T) {
+	c := fake(t, "into")
+	c.Env = append(c.Env, "CONN3X_FAKE_WAIT=1")
+	ctx, cancel := context.WithCancel(context.Background())
+	start := time.Now()
+	err := c.RunInto(ctx, func(ev Event) error {
+		if ev.Type == "apply_complete" {
+			cancel()
+		}
+		return nil
+	}, t.TempDir()+"/stream.json", "apply")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v", err)
+	}
+	if time.Since(start) > 4*time.Second {
+		t.Error("conn3x wasn't interrupted; it waited to be killed")
 	}
 }
 

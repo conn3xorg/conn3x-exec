@@ -16,6 +16,7 @@ err := c.Run(ctx, func(ev conn3xexec.Event) error {
 ```
 
 - **`Run`** adds `-json` after the command, so pass `plan`, `apply`, `destroy` or `refresh` and their flags as you'd type them.
+- **`RunInto`** writes the stream to a file with `-json-into` instead and follows it as conn3x writes, for flags that need stdout free of `-json`, such as `apply -report`.
 - **Cancel the context** and Conn3x gets an interrupt, as Ctrl-C sends, so it stops cleanly and releases its state lock. It's killed only if it hasn't stopped after `Grace` (30 seconds by default). On Windows it's killed straight away.
 - **A non-zero exit** comes back as an `*ExitError` with its code and the error diagnostics from the stream. `plan -detailed-exitcode` exiting 2 for "there are changes" is `ExitError{Code: 2}`.
 - **`Read`** reads a stream you already have, such as a file from `-json-into`.

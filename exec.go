@@ -49,13 +49,29 @@ func (e *ExitError) Error() string {
 // after Grace. If fn returns an error, conn3x is stopped the same way and
 // Run returns that error.
 func (c *Conn3x) Run(ctx context.Context, fn func(Event) error, command string, args ...string) error {
+	return c.run(ctx, fn, "", command, args)
+}
+
+// RunInto is Run with the stream written to the file stream, through
+// -json-into, and followed as conn3x writes it. It's for flags that need
+// stdout free of -json, such as apply -report. conn3x's human output on
+// stdout is discarded.
+func (c *Conn3x) RunInto(ctx context.Context, fn func(Event) error, stream, command string, args ...string) error {
+	return c.run(ctx, fn, stream, command, args)
+}
+
+func (c *Conn3x) run(ctx context.Context, fn func(Event) error, stream, command string, args []string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	path := c.Path
 	if path == "" {
 		path = "conn3x"
 	}
-	cmd := exec.CommandContext(ctx, path, append([]string{command, "-json"}, args...)...)
+	flag := "-json"
+	if stream != "" {
+		flag = "-json-into=" + stream
+	}
+	cmd := exec.CommandContext(ctx, path, append([]string{command, flag}, args...)...)
 	cmd.Dir = c.Dir
 	if len(c.Env) > 0 {
 		cmd.Env = append(os.Environ(), c.Env...)
@@ -71,27 +87,46 @@ func (c *Conn3x) Run(ctx context.Context, fn func(Event) error, command string, 
 	if cmd.WaitDelay == 0 {
 		cmd.WaitDelay = 30 * time.Second
 	}
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
 	var diags []Diagnostic
 	var fnErr error
-	readErr := Read(out, func(ev Event) error {
-		if ev.Diagnostic != nil && ev.Diagnostic.Severity == "error" {
-			diags = append(diags, *ev.Diagnostic)
-		}
-		if fnErr == nil {
-			if fnErr = fn(ev); fnErr != nil {
-				cancel() // keep reading, so conn3x isn't blocked writing
+	read := func(r io.Reader) error {
+		return Read(r, func(ev Event) error {
+			if ev.Diagnostic != nil && ev.Diagnostic.Severity == "error" {
+				diags = append(diags, *ev.Diagnostic)
 			}
+			if fnErr == nil {
+				if fnErr = fn(ev); fnErr != nil {
+					cancel() // keep reading, so conn3x isn't blocked writing
+				}
+			}
+			return nil
+		})
+	}
+	var readErr, waitErr error
+	if stream == "" {
+		out, err := cmd.StdoutPipe()
+		if err != nil {
+			return err
 		}
-		return nil
-	})
-	waitErr := cmd.Wait()
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		readErr = read(out)
+		waitErr = cmd.Wait()
+	} else {
+		f, err := os.Create(stream)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		exited := make(chan struct{})
+		go func() { waitErr = cmd.Wait(); close(exited) }()
+		readErr = read(follow{f, exited})
+		<-exited
+	}
 	if fnErr != nil {
 		return fnErr
 	}
@@ -106,4 +141,25 @@ func (c *Conn3x) Run(ctx context.Context, fn func(Event) error, command string, 
 		return waitErr
 	}
 	return readErr
+}
+
+// follow reads a file another process is still writing, waiting at its
+// end until done is closed.
+type follow struct {
+	f    *os.File
+	done <-chan struct{}
+}
+
+func (fl follow) Read(b []byte) (int, error) {
+	for {
+		n, err := fl.f.Read(b)
+		if n > 0 || err != io.EOF {
+			return n, err
+		}
+		select {
+		case <-fl.done:
+			return fl.f.Read(b) // whatever came before it exited
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
